@@ -13,6 +13,7 @@ maintainers = [
 ]
 
 dependencies = [
+    "cryptography>=48.0.0"
 ]
 
 [project.entry-points."pretix.plugin"]
@@ -34,9 +35,25 @@ repository = "https://github.com/fossasia/eventyay-hubspot"
 [tool.setuptools]
 include-package-data = true
 
+[tool.setuptools.package-data]
+hubspot = [
+    "static/**/*",
+    "templates/**/*",
+    "locale/**/*",
+]
+
 [tool.setuptools.dynamic]
 version = {attr = "hubspot.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["hubspot*"]
 namespaces = false
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "eventyay.config.settings"
+
+[tool.coverage.run]
+source = ["hubspot"]
+omit = [
+    "*/migrations/*",
+]
