@@ -13,9 +13,13 @@ from django.utils.translation import gettext_lazy as _
 from django.views.generic import TemplateView, View
 from django_scopes import scope
 from eventyay.base.models import Event
+
 from eventyay.control.permissions import EventPermissionRequiredMixin
 
 from .models import HubSpotOAuthToken, SyncLog, SyncAction, SyncDirection, SyncStatus
+
+# Environment variables are loaded dynamically in the views
+
 
 # Environment variables are loaded dynamically in the views
 
@@ -121,33 +125,23 @@ class EventHubSpotCallbackView(View):
                 _("You do not have permission to view this content.")
             )
 
-        if not code:
-            messages.error(request, _("No authorization code provided."))
-            return redirect(settings_url)
-
         redirect_uri = os.environ.get("HUBSPOT_REDIRECT_URI", "")
         if not redirect_uri:
             redirect_uri = request.build_absolute_uri(
                 reverse("plugins:hubspot:callback")
             )
 
-        try:
-            response = requests.post(
-                "https://api.hubapi.com/oauth/v1/token",
-                data={
-                    "grant_type": "authorization_code",
-                    "client_id": os.environ.get("HUBSPOT_CLIENT_ID", ""),
-                    "client_secret": os.environ.get("HUBSPOT_CLIENT_SECRET", ""),
-                    "redirect_uri": redirect_uri,
-                    "code": code,
-                },
-                timeout=15,
-            )
-        except requests.RequestException:
-            messages.error(
-                request, _("Network error while trying to connect to HubSpot.")
-            )
-            return redirect(settings_url)
+        response = requests.post(
+            "https://api.hubapi.com/oauth/v1/token",
+            data={
+                "grant_type": "authorization_code",
+                "client_id": os.environ.get("HUBSPOT_CLIENT_ID", ""),
+                "client_secret": os.environ.get("HUBSPOT_CLIENT_SECRET", ""),
+                "redirect_uri": redirect_uri,
+                "code": code,
+            },
+            timeout=15,
+        )
 
         if not response.ok:
             messages.error(request, _("Failed to exchange token with HubSpot."))
@@ -159,7 +153,7 @@ class EventHubSpotCallbackView(View):
             now() + datetime.timedelta(seconds=expires_in) if expires_in else None
         )
 
-        with scope(organizer=event.organizer):
+        with scope(event=event):
             HubSpotOAuthToken.objects.update_or_create(
                 event=event,
                 defaults={
@@ -183,4 +177,59 @@ class EventHubSpotCallbackView(View):
             )
 
         messages.success(request, _("Successfully connected to HubSpot."))
+        return redirect(settings_url)
+
+
+class EventHubSpotDisconnectView(EventPermissionRequiredMixin, View):
+    """Disconnects from HubSpot, revoking the token and clearing local credentials."""
+
+    permission = "can_change_event_settings"
+
+    def post(self, request, *args, **kwargs):
+        settings_url = reverse(
+            "plugins:hubspot:hubspot",
+            kwargs={
+                "organizer": request.event.organizer.slug,
+                "event": request.event.slug,
+            },
+        )
+
+        try:
+            token = HubSpotOAuthToken.objects.get(event=request.event)
+        except HubSpotOAuthToken.DoesNotExist:
+            messages.info(request, _("Not connected to HubSpot."))
+            return redirect(settings_url)
+
+        # Attempt to revoke at HubSpot
+        try:
+            # We use the refresh token to revoke, as per HubSpot docs.
+            revoke_url = (
+                f"https://api.hubapi.com/oauth/v1/refresh-tokens/{token.refresh_token}"
+            )
+            response = requests.delete(revoke_url, timeout=10)
+            if not response.ok:
+                import logging
+
+                logger = logging.getLogger(__name__)
+                logger.warning(
+                    f"Failed to revoke HubSpot token: {response.status_code} {response.text}"
+                )
+        except requests.RequestException as e:
+            import logging
+
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Error reaching HubSpot revoke endpoint: {e}")
+
+        # Always clear local credentials
+        with scope(organizer=request.event.organizer):
+            token.delete()
+            SyncLog.objects.create(
+                event=request.event,
+                action=SyncAction.DISCONNECT,
+                direction=SyncDirection.PUSH,
+                status=SyncStatus.SUCCESS,
+                detail={"message": "Disconnected from HubSpot"},
+            )
+
+        messages.success(request, _("Successfully disconnected from HubSpot."))
         return redirect(settings_url)
